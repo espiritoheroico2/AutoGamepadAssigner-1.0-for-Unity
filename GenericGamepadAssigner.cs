@@ -1,45 +1,48 @@
 // =============================================================================
 //  GenericGamepadAssigner.cs
-//  Autor: gerado como utilitário genérico reutilizável
+//  Utilitário genérico e reutilizável — Unity Input System
 // =============================================================================
 //
 //  O QUE ESTE SCRIPT FAZ:
 //  ----------------------
-//  Detecta automaticamente quantos gamepads estão conectados e os distribui
-//  entre os players da cena. Cada player precisa ter apenas um componente
-//  "PlayerInput" (do pacote Unity Input System) — nenhum script customizado
-//  é necessário.
+//  Detecta automaticamente os dispositivos conectados (gamepads + teclado)
+//  e os distribui exclusivamente entre até 4 jogadores.
+//  Cada jogador precisa ter apenas um componente "PlayerInput" no seu
+//  GameObject — nenhum script de movimento customizado é necessário.
 //
-//  COMO FUNCIONA O PLAYERINPUT:
-//  ----------------------------
-//  O componente PlayerInput do Unity já sabe lidar com múltiplos jogadores.
-//  Ele possui uma propriedade "devices" que limita quais dispositivos físicos
-//  aquele player vai ouvir. Este script apenas preenche essa propriedade
-//  com o dispositivo correto para cada player.
+//  LÓGICA DE DISTRIBUIÇÃO (automática, por prioridade):
+//  -----------------------------------------------------
+//  Os players são processados na ordem da lista (slot 0, 1, 2, 3...).
+//  Os gamepads são distribuídos primeiro, na ordem em que foram conectados.
+//  Se sobrarem players sem gamepad, o teclado é atribuído ao próximo da fila.
+//  Players além dos dispositivos disponíveis ficam sem dispositivo.
 //
-//  MODOS DE JOGO SUPORTADOS (automático):
-//  ----------------------------------------
-//  | Dispositivos conectados  | Player 1        | Player 2        |
-//  |--------------------------|-----------------|-----------------|
-//  | 2+ gamepads              | Gamepad 0       | Gamepad 1       |
-//  | 1 gamepad + teclado      | Gamepad         | Teclado         |
-//  | Só teclado               | Teclado (livre) | Teclado (livre) |
-//  | Nenhum                   | aviso           | aviso           |
+//  Exemplos:
+//  ┌─────────────────────────────┬────────┬────────┬────────┬────────┐
+//  │ Dispositivos conectados     │  P1    │  P2    │  P3    │  P4    │
+//  ├─────────────────────────────┼────────┼────────┼────────┼────────┤
+//  │ 4 gamepads                  │ GP[0]  │ GP[1]  │ GP[2]  │ GP[3]  │
+//  │ 3 gamepads                  │ GP[0]  │ GP[1]  │ GP[2]  │ teclado│
+//  │ 2 gamepads                  │ GP[0]  │ GP[1]  │ teclado│  —     │
+//  │ 1 gamepad                   │ GP[0]  │ teclado│  —     │  —     │
+//  │ Só teclado                  │ livre  │ livre  │ livre  │ livre  │
+//  └─────────────────────────────┴────────┴────────┴────────┴────────┘
+//  (livre = sem InputUser restrito; todos leem o teclado pelos próprios bindings)
 //
 //  COMO USAR:
 //  ----------
 //  1. Adicione este script a um GameObject vazio na cena (ex: "GamepadAssigner")
 //  2. Cada personagem jogável precisa ter um componente "PlayerInput"
-//  3. Preencha os campos "Player 1 Input" e "Player 2 Input" no Inspector,
-//     OU preencha as tags e deixe o script encontrar sozinho
-//  4. Pronto! Os dispositivos são distribuídos automaticamente no Start()
-//     e sempre que um controle for conectado/desconectado.
+//  3. No Inspector, configure a lista "Players" com até 4 entradas:
+//       - Arraste o componente PlayerInput diretamente, OU
+//       - Deixe o campo vazio e preencha a Tag para busca automática
+//  4. Pronto! A distribuição acontece no Start() e se atualiza automaticamente
+//     quando controles são conectados ou desconectados.
 //
 //  REQUISITOS:
 //  -----------
-//  - Unity Input System (instale via Package Manager)
-//  - Cada player precisa ter o componente PlayerInput
-//  - O PlayerInput de cada player deve ter um InputActionAsset configurado
+//  - Unity Input System instalado (Package Manager)
+//  - Cada player precisa ter o componente PlayerInput com um InputActionAsset
 //
 // =============================================================================
 
@@ -50,53 +53,67 @@ using UnityEngine.InputSystem;
 public class GenericGamepadAssigner : MonoBehaviour
 {
     // =========================================================================
+    // ESTRUTURA DE DADOS: SLOT DE JOGADOR
+    // =========================================================================
+
+    /// <summary>
+    /// Representa a configuração de um jogador no Inspector.
+    /// Cada slot pode ser preenchido com uma referência direta ao PlayerInput
+    /// ou com uma tag para busca automática na cena — ou ambos.
+    /// </summary>
+    [System.Serializable]
+    public class PlayerSlot
+    {
+        [Tooltip(
+            "Nome exibido nos logs para identificar este jogador.\n" +
+            "Ex: 'Player 1', 'Player 3', etc.")]
+        public string label = "Player";
+
+        [Tooltip(
+            "Referência direta ao componente PlayerInput deste jogador.\n" +
+            "Se preenchido, a Tag abaixo é ignorada.")]
+        public PlayerInput playerInput;
+
+        [Tooltip(
+            "Tag do GameObject deste jogador na cena.\n" +
+            "Usada apenas se o campo 'Player Input' acima estiver vazio.")]
+        public string tag = "";
+
+        // Referência resolvida internamente (não aparece no Inspector)
+        // Pode ser diferente de playerInput se foi encontrado via tag
+        [System.NonSerialized]
+        public PlayerInput resolvedInput;
+    }
+
+    // =========================================================================
     // CONFIGURAÇÃO NO INSPECTOR
     // =========================================================================
 
-    [Header("─── Referências dos Players ───────────────────────────────────")]
-
+    [Header("─── Jogadores (até 4) ──────────────────────────────────────────")]
     [Tooltip(
-        "Componente PlayerInput do primeiro jogador.\n" +
-        "Se deixado vazio, o script tenta encontrar automaticamente pela Tag abaixo.")]
-    public PlayerInput playerInput1;
-
-    [Tooltip(
-        "Componente PlayerInput do segundo jogador.\n" +
-        "Se deixado vazio, o script tenta encontrar automaticamente pela Tag abaixo.")]
-    public PlayerInput playerInput2;
-
-    [Header("─── Busca Automática por Tag ────────────────────────────────────")]
-
-    [Tooltip(
-        "Tag do GameObject do Player 1.\n" +
-        "Usada apenas se 'Player Input 1' estiver vazio.")]
-    public string tagPlayer1 = "Player";
-
-    [Tooltip(
-        "Tag do GameObject do Player 2.\n" +
-        "Usada apenas se 'Player Input 2' estiver vazio.")]
-    public string tagPlayer2 = "Player2";
+        "Lista de jogadores. Adicione de 1 a 4 entradas.\n" +
+        "A ordem importa: o primeiro da lista recebe o primeiro gamepad,\n" +
+        "o segundo recebe o segundo, e assim por diante.")]
+    public List<PlayerSlot> players = new List<PlayerSlot>()
+    {
+        // Valores padrão pré-configurados para conveniência
+        new PlayerSlot { label = "Player 1", tag = "Player"  },
+        new PlayerSlot { label = "Player 2", tag = "Player2" },
+        new PlayerSlot { label = "Player 3", tag = "Player3" },
+        new PlayerSlot { label = "Player 4", tag = "Player4" },
+    };
 
     [Header("─── Configurações ───────────────────────────────────────────────")]
 
     [Tooltip(
-        "Se verdadeiro, o script redistribui os dispositivos automaticamente\n" +
+        "Se verdadeiro, redistribui os dispositivos automaticamente\n" +
         "sempre que um controle for conectado ou desconectado durante o jogo.")]
     public bool autoReassignOnDeviceChange = true;
 
     [Tooltip(
-        "Se verdadeiro, exibe logs detalhados no Console durante a distribuição.\n" +
-        "Recomendado deixar ligado durante desenvolvimento.")]
+        "Se verdadeiro, exibe logs detalhados no Console.\n" +
+        "Recomendado manter ligado durante desenvolvimento.")]
     public bool debugLogs = true;
-
-    // =========================================================================
-    // PRIVADOS
-    // =========================================================================
-
-    // Guarda os PlayerInputs resolvidos internamente para não depender
-    // de os campos públicos estarem preenchidos no Inspector
-    private PlayerInput resolvedInput1;
-    private PlayerInput resolvedInput2;
 
     // =========================================================================
     // CICLO DE VIDA UNITY
@@ -104,31 +121,27 @@ public class GenericGamepadAssigner : MonoBehaviour
 
     private void Awake()
     {
-        // Tenta resolver as referências o mais cedo possível.
-        // Assim outros scripts que dependam disso já encontram os players prontos.
-        ResolveReferences();
+        // Resolve as referências o mais cedo possível para que outros scripts
+        // já encontrem tudo pronto durante seus próprios Awakes/Starts
+        ResolveAllReferences();
     }
 
     private void Start()
     {
-        // Distribui os dispositivos na inicialização.
-        // Feito no Start (não no Awake) para garantir que todos os componentes
-        // PlayerInput já foram inicializados pelos seus próprios GameObjects.
+        // Distribui os dispositivos no Start (não no Awake) para garantir
+        // que todos os componentes PlayerInput já foram inicializados
         AssignDevices();
     }
 
     private void OnEnable()
     {
-        // Registra o listener de mudança de dispositivos.
-        // Isso cobre casos como: player conecta um controle durante o jogo,
-        // controle cai e desconecta, etc.
+        // Escuta mudanças de dispositivos em tempo real
         InputSystem.onDeviceChange += OnDeviceChange;
     }
 
     private void OnDisable()
     {
         // IMPORTANTE: sempre remova listeners para evitar memory leaks
-        // e chamadas a objetos já destruídos.
         InputSystem.onDeviceChange -= OnDeviceChange;
     }
 
@@ -137,164 +150,184 @@ public class GenericGamepadAssigner : MonoBehaviour
     // =========================================================================
 
     /// <summary>
-    /// Tenta preencher resolvedInput1 e resolvedInput2.
-    /// Prioridade: campo público no Inspector > busca por tag na cena.
+    /// Percorre todos os slots e resolve o PlayerInput de cada um.
+    /// Prioridade: campo direto no Inspector > busca por tag.
     /// </summary>
-    private void ResolveReferences()
+    private void ResolveAllReferences()
     {
-        // --- Player 1 ---
-        // Se o campo foi preenchido manualmente no Inspector, usa ele direto
-        resolvedInput1 = playerInput1;
-
-        // Se não foi preenchido, tenta encontrar pelo tag configurado
-        if (resolvedInput1 == null)
+        // Limita a 4 slots para segurança
+        // (mais que isso geralmente não faz sentido para local multiplayer)
+        if (players.Count > 4)
         {
-            resolvedInput1 = FindPlayerInputByTag(tagPlayer1);
-
-            if (resolvedInput1 == null)
-                Debug.LogWarning($"[GenericGamepadAssigner] Player 1 não encontrado. " +
-                                 $"Verifique o campo 'Player Input 1' ou a tag '{tagPlayer1}'.");
+            Debug.LogWarning($"[GenericGamepadAssigner] {players.Count} slots configurados. " +
+                              "O máximo recomendado é 4. Os slots excedentes serão ignorados.");
         }
 
-        // --- Player 2 ---
-        resolvedInput2 = playerInput2;
+        int limit = Mathf.Min(players.Count, 4);
 
-        if (resolvedInput2 == null)
+        for (int i = 0; i < limit; i++)
         {
-            resolvedInput2 = FindPlayerInputByTag(tagPlayer2);
+            PlayerSlot slot = players[i];
 
-            if (resolvedInput2 == null)
-                Debug.LogWarning($"[GenericGamepadAssigner] Player 2 não encontrado. " +
-                                 $"Verifique o campo 'Player Input 2' ou a tag '{tagPlayer2}'.");
+            // --- Prioridade 1: referência direta no Inspector ---
+            if (slot.playerInput != null)
+            {
+                slot.resolvedInput = slot.playerInput;
+                Log($"Slot {i} ({slot.label}): usando referência direta → {slot.playerInput.gameObject.name}");
+                continue;
+            }
+
+            // --- Prioridade 2: busca por tag ---
+            if (!string.IsNullOrEmpty(slot.tag))
+            {
+                slot.resolvedInput = FindPlayerInputByTag(slot.tag, slot.label);
+                continue;
+            }
+
+            // --- Nenhuma das duas configuradas ---
+            Debug.LogWarning($"[GenericGamepadAssigner] Slot {i} ({slot.label}): " +
+                              "nem 'Player Input' nem 'Tag' foram configurados. Este slot será ignorado.");
+            slot.resolvedInput = null;
         }
     }
 
     /// <summary>
-    /// Procura na cena um GameObject com a tag informada e retorna
-    /// o componente PlayerInput nele (ou null se não encontrar).
+    /// Busca um GameObject pela tag informada e retorna seu PlayerInput.
+    /// Retorna null com log de aviso se não encontrar.
     /// </summary>
-    /// <param name="tag">A tag a ser buscada na cena.</param>
-    private PlayerInput FindPlayerInputByTag(string tag)
+    /// <param name="tag">Tag a ser buscada na cena.</param>
+    /// <param name="label">Nome do slot para exibir no log.</param>
+    private PlayerInput FindPlayerInputByTag(string tag, string label)
     {
-        // FindGameObjectWithTag retorna null silenciosamente se a tag não existir
-        // no projeto, então protegemos com try/catch para dar uma mensagem clara
         try
         {
             GameObject obj = GameObject.FindGameObjectWithTag(tag);
 
             if (obj == null)
             {
-                Log($"Nenhum objeto com a tag '{tag}' foi encontrado na cena.");
+                Debug.LogWarning($"[GenericGamepadAssigner] ({label}): " +
+                                 $"Nenhum objeto com a tag '{tag}' foi encontrado na cena.");
                 return null;
             }
 
             PlayerInput input = obj.GetComponent<PlayerInput>();
 
             if (input == null)
-                Debug.LogWarning($"[GenericGamepadAssigner] O objeto '{obj.name}' (tag: '{tag}') " +
-                                 $"não possui um componente PlayerInput.");
+                Debug.LogWarning($"[GenericGamepadAssigner] ({label}): " +
+                                 $"O objeto '{obj.name}' (tag: '{tag}') não tem componente PlayerInput.");
+            else
+                Log($"({label}): encontrado por tag '{tag}' → {obj.name}");
 
             return input;
         }
         catch (UnityException e)
         {
-            // Acontece quando a tag nem existe no projeto
-            Debug.LogError($"[GenericGamepadAssigner] A tag '{tag}' não existe no projeto Unity. " +
+            // Disparado quando a tag não existe no projeto (nem está cadastrada)
+            Debug.LogError($"[GenericGamepadAssigner] ({label}): " +
+                           $"A tag '{tag}' não existe no projeto. " +
                            $"Crie-a em Edit > Tags and Layers.\nDetalhes: {e.Message}");
             return null;
         }
     }
 
     // =========================================================================
-    // DISTRIBUIÇÃO DE DISPOSITIVOS
+    // DISTRIBUIÇÃO DE DISPOSITIVOS — MÉTODO PRINCIPAL
     // =========================================================================
 
     /// <summary>
-    /// Método principal. Detecta os dispositivos disponíveis e os distribui
-    /// entre os players de acordo com o que está conectado.
+    /// Detecta os dispositivos disponíveis e os distribui entre os slots
+    /// configurados, na ordem da lista.
     ///
-    /// Pode ser chamado manualmente a qualquer momento (ex: menu de configurações,
-    /// após uma cena carregar, etc).
+    /// Pode ser chamado manualmente a qualquer momento — por exemplo,
+    /// ao carregar uma nova cena ou abrir um menu de configuração.
     /// </summary>
     public void AssignDevices()
     {
-        // Garante que as referências estejam resolvidas antes de tentar usar
-        ResolveReferences();
+        // Garante que as referências estejam atualizadas antes de distribuir
+        ResolveAllReferences();
 
-        // Se nem os dois players foram encontrados, não tem o que fazer
-        if (resolvedInput1 == null && resolvedInput2 == null)
+        // Monta a fila de dispositivos disponíveis na ordem de prioridade:
+        // gamepads primeiro (na ordem de conexão), teclado por último
+        List<InputDevice> availableDevices = BuildDeviceQueue();
+
+        Log($"Fila de dispositivos montada: [{string.Join(", ", availableDevices.ConvertAll(d => d.displayName))}]");
+
+        // Conta quantos players foram resolvidos com sucesso
+        int resolvedCount = 0;
+
+        int limit = Mathf.Min(players.Count, 4);
+
+        for (int i = 0; i < limit; i++)
         {
-            Debug.LogError("[GenericGamepadAssigner] Nenhum player encontrado. " +
-                           "A distribuição de dispositivos foi cancelada.");
-            return;
-        }
+            PlayerSlot slot = players[i];
 
-        // Coleta todos os gamepads físicos conectados no momento
-        // Gamepad.all é uma lista somente-leitura mantida automaticamente pelo Input System
-        List<Gamepad> gamepads = new List<Gamepad>(Gamepad.all);
+            // Slot sem PlayerInput válido: pula
+            if (slot.resolvedInput == null)
+            {
+                Log($"Slot {i} ({slot.label}): sem PlayerInput, pulando.");
+                continue;
+            }
 
-        // Referência ao teclado atual (pode ser null se não houver teclado)
-        Keyboard keyboard = Keyboard.current;
+            resolvedCount++;
 
-        Log($"Dispositivos detectados: {gamepads.Count} gamepad(s), " +
-            $"teclado: {(keyboard != null ? keyboard.displayName : "nenhum")}");
+            // Verifica se há um dispositivo disponível para este slot
+            if (i < availableDevices.Count)
+            {
+                // Há um dispositivo na fila para este player
+                InputDevice device = availableDevices[i];
 
-        // -----------------------------------------------------------------
-        // CASO 1: Dois ou mais gamepads conectados
-        // Cada player recebe seu próprio controle físico.
-        // -----------------------------------------------------------------
-        if (gamepads.Count >= 2)
-        {
-            PairDevicesToPlayer(resolvedInput1, "Player 1", gamepads[0]);
-            PairDevicesToPlayer(resolvedInput2, "Player 2", gamepads[1]);
-
-            Log($"Modo: 2 Gamepads → " +
-                $"P1: {gamepads[0].displayName} | P2: {gamepads[1].displayName}");
-            return;
-        }
-
-        // -----------------------------------------------------------------
-        // CASO 2: Exatamente um gamepad conectado
-        // Player 1 fica com o controle, Player 2 usa o teclado.
-        // -----------------------------------------------------------------
-        if (gamepads.Count == 1)
-        {
-            PairDevicesToPlayer(resolvedInput1, "Player 1", gamepads[0]);
-
-            if (keyboard != null)
-                PairDevicesToPlayer(resolvedInput2, "Player 2", keyboard);
+                if (device is Keyboard)
+                {
+                    // Teclado é compartilhado — não restringe via InputUser
+                    // Cada PlayerInput lerá o teclado pelos seus próprios bindings
+                    ReleasePlayerDevices(slot.resolvedInput, slot.label);
+                    Log($"Slot {i} ({slot.label}): teclado livre " +
+                        "(lê pelo binding do InputActionAsset).");
+                }
+                else
+                {
+                    // Gamepad: pareia exclusivamente com este player
+                    PairDeviceToPlayer(slot.resolvedInput, slot.label, device);
+                }
+            }
             else
-                Log("Apenas 1 gamepad e nenhum teclado detectado. Player 2 sem dispositivo.");
-
-            Log($"Modo: 1 Gamepad + Teclado → " +
-                $"P1: {gamepads[0].displayName} | P2: {(keyboard != null ? keyboard.displayName : "sem dispositivo")}");
-            return;
+            {
+                // Sem dispositivo disponível para este slot
+                ReleasePlayerDevices(slot.resolvedInput, slot.label);
+                Log($"Slot {i} ({slot.label}): sem dispositivo disponível.");
+            }
         }
 
-        // -----------------------------------------------------------------
-        // CASO 3: Nenhum gamepad — apenas teclado disponível
-        // Neste caso, NÃO restringimos o dispositivo de nenhum player.
-        // Ambos leem o teclado livremente, cada um com seus próprios
-        // bindings (ex: WASD para P1, Setas para P2) definidos no
-        // InputActionAsset.
-        // -----------------------------------------------------------------
-        if (keyboard != null)
-        {
-            // "Liberar" o player significa não forçar nenhum dispositivo específico,
-            // deixando o PlayerInput ouvir qualquer dispositivo compatível com seus bindings
-            ReleasePlayerDevices(resolvedInput1, "Player 1");
-            ReleasePlayerDevices(resolvedInput2, "Player 2");
+        if (resolvedCount == 0)
+            Debug.LogError("[GenericGamepadAssigner] Nenhum PlayerInput foi encontrado. " +
+                           "Verifique as referências e tags configuradas.");
+    }
 
-            Log("Modo: Só Teclado → Ambos os players leem teclado livremente " +
-                "(WASD vs Setas, conforme definido no InputActionAsset).");
-            return;
-        }
+    /// <summary>
+    /// Monta uma lista ordenada de dispositivos disponíveis para distribuição.
+    ///
+    /// Ordem:
+    ///   1. Gamepads conectados (na ordem em que foram plugados — Gamepad.all)
+    ///   2. Teclado (se disponível), como última opção
+    ///
+    /// O teclado entra na fila mas é tratado de forma especial em AssignDevices():
+    /// ao invés de restringir, liberamos o PlayerInput para ler livremente,
+    /// pois múltiplos players podem precisar ler o mesmo teclado com bindings
+    /// diferentes (ex: WASD vs Setas).
+    /// </summary>
+    private List<InputDevice> BuildDeviceQueue()
+    {
+        List<InputDevice> queue = new List<InputDevice>();
 
-        // -----------------------------------------------------------------
-        // CASO 4: Nenhum dispositivo detectado
-        // -----------------------------------------------------------------
-        Debug.LogWarning("[GenericGamepadAssigner] Nenhum dispositivo de entrada detectado! " +
-                         "Conecte um gamepad ou verifique o teclado.");
+        // Adiciona todos os gamepads na ordem de conexão
+        foreach (Gamepad gp in Gamepad.all)
+            queue.Add(gp);
+
+        // Adiciona o teclado ao final (se existir)
+        if (Keyboard.current != null)
+            queue.Add(Keyboard.current);
+
+        return queue;
     }
 
     // =========================================================================
@@ -302,91 +335,75 @@ public class GenericGamepadAssigner : MonoBehaviour
     // =========================================================================
 
     /// <summary>
-    /// Força um PlayerInput a ouvir exclusivamente o dispositivo informado.
+    /// Restringe um PlayerInput a ouvir exclusivamente um dispositivo.
     ///
-    /// Como funciona:
-    /// O PlayerInput possui uma lista interna de "devices" que filtra quais
-    /// dispositivos físicos ele aceita. Ao definir essa lista, garantimos que
-    /// dois PlayerInputs com o mesmo InputActionAsset não vão se interferir.
+    /// Internamente, SwitchCurrentControlScheme() chama InputUser para
+    /// fazer o pareamento. Após isso, o PlayerInput ignora qualquer outro
+    /// dispositivo físico — impedindo interferências entre players.
     /// </summary>
-    /// <param name="playerInput">O componente PlayerInput do player.</param>
-    /// <param name="playerLabel">Nome para exibir no log (ex: "Player 1").</param>
-    /// <param name="device">O dispositivo que este player deve usar.</param>
-    private void PairDevicesToPlayer(PlayerInput playerInput, string playerLabel, InputDevice device)
+    /// <param name="playerInput">Componente PlayerInput do jogador.</param>
+    /// <param name="label">Nome para exibir no log.</param>
+    /// <param name="device">Dispositivo a ser pareado exclusivamente.</param>
+    private void PairDeviceToPlayer(PlayerInput playerInput, string label, InputDevice device)
     {
-        // Proteção: se o player não foi encontrado, ignora silenciosamente
-        if (playerInput == null)
-        {
-            Log($"{playerLabel}: PlayerInput é null, pareamento ignorado.");
-            return;
-        }
+        if (playerInput == null || device == null) return;
 
-        if (device == null)
-        {
-            Log($"{playerLabel}: Dispositivo é null, pareamento ignorado.");
-            return;
-        }
-
-        // Define o dispositivo exclusivo para este PlayerInput.
-        // Isso substitui qualquer pareamento anterior.
-        // Internamente o Unity chama InputUser.PerformPairingWithDevice por baixo.
         playerInput.SwitchCurrentControlScheme(device);
 
-        Log($"{playerLabel} ({playerInput.gameObject.name}) → {device.displayName}");
+        Log($"({label}) [{playerInput.gameObject.name}] → pareado com: {device.displayName}");
     }
 
     /// <summary>
-    /// Remove a restrição de dispositivo de um PlayerInput,
-    /// deixando-o ouvir qualquer dispositivo compatível com seus bindings.
+    /// Remove a restrição de dispositivo de um PlayerInput.
     ///
-    /// Usado no modo "só teclado", onde ambos os players precisam ler
-    /// o mesmo teclado com bindings diferentes.
+    /// Após chamar isso, o PlayerInput voltará a aceitar qualquer dispositivo
+    /// compatível com os bindings do seu InputActionAsset. Útil para o modo
+    /// teclado, onde múltiplos players compartilham o mesmo dispositivo físico.
     /// </summary>
-    /// <param name="playerInput">O componente PlayerInput do player.</param>
-    /// <param name="playerLabel">Nome para exibir no log.</param>
-    private void ReleasePlayerDevices(PlayerInput playerInput, string playerLabel)
+    /// <param name="playerInput">Componente PlayerInput do jogador.</param>
+    /// <param name="label">Nome para exibir no log.</param>
+    private void ReleasePlayerDevices(PlayerInput playerInput, string label)
     {
         if (playerInput == null) return;
 
-        // Ao passar um array vazio, o PlayerInput volta a aceitar qualquer dispositivo
-        // compatível com o control scheme ativo no InputActionAsset
+        // UnpairDevices() desvincula todos os dispositivos associados ao InputUser
+        // deste PlayerInput, liberando-o para leitura genérica
         playerInput.user.UnpairDevices();
 
-        Log($"{playerLabel} ({playerInput.gameObject.name}) → dispositivos liberados (modo teclado livre).");
+        Log($"({label}) [{playerInput.gameObject.name}] → dispositivos liberados.");
     }
 
     // =========================================================================
-    // EVENTO: DISPOSITIVO CONECTADO/DESCONECTADO
+    // EVENTO: DISPOSITIVO CONECTADO / DESCONECTADO
     // =========================================================================
 
     /// <summary>
-    /// Chamado automaticamente pelo Input System sempre que um dispositivo
-    /// é conectado, desconectado, habilitado ou desabilitado.
+    /// Listener chamado pelo Input System sempre que qualquer dispositivo
+    /// muda de estado (conectado, desconectado, reconfigurado, etc.).
     /// </summary>
     private void OnDeviceChange(InputDevice device, InputDeviceChange change)
     {
-        // Só nos importa mudanças em gamepads
-        // (teclado e mouse raramente mudam em runtime)
+        // Só reagimos a gamepads — teclado e mouse raramente mudam em runtime
         if (device is not Gamepad) return;
 
-        // Só redistribui se a opção estiver habilitada no Inspector
+        // Respeita o toggle do Inspector
         if (!autoReassignOnDeviceChange) return;
 
         switch (change)
         {
             case InputDeviceChange.Added:
-                Log($"Gamepad conectado: {device.displayName}. Redistribuindo...");
+                Log($"Gamepad conectado: '{device.displayName}'. Redistribuindo...");
                 AssignDevices();
                 break;
 
             case InputDeviceChange.Removed:
             case InputDeviceChange.Disconnected:
-                Log($"Gamepad desconectado: {device.displayName}. Redistribuindo...");
+                Log($"Gamepad desconectado: '{device.displayName}'. Redistribuindo...");
                 AssignDevices();
                 break;
 
-            // Outros casos (Reconnected, ConfigurationChanged, etc.) são ignorados
-            // para evitar redistribuições desnecessárias
+            // Reconnected, ConfigurationChanged, etc. são ignorados intencionalmente
+            // para evitar redistribuições desnecessárias durante o jogo
         }
     }
 
@@ -395,8 +412,8 @@ public class GenericGamepadAssigner : MonoBehaviour
     // =========================================================================
 
     /// <summary>
-    /// Log condicional — só exibe se debugLogs estiver habilitado no Inspector.
-    /// Facilita desligar todos os logs de uma vez em produção.
+    /// Log interno condicional. Respeita o toggle "debugLogs" do Inspector.
+    /// Use isso no lugar de Debug.Log() direto para facilitar silenciar em produção.
     /// </summary>
     private void Log(string message)
     {
@@ -405,24 +422,26 @@ public class GenericGamepadAssigner : MonoBehaviour
     }
 
     // =========================================================================
-    // EDITOR — FERRAMENTAS DE DEBUG
+    // EDITOR — FERRAMENTAS DE DEBUG (só visíveis no Unity Editor)
     // =========================================================================
 
 #if UNITY_EDITOR
+
     /// <summary>
-    /// Aparece como botão ao clicar com botão direito no componente no Inspector.
-    /// Útil para testar a distribuição sem precisar dar Play novamente.
+    /// Botão no Inspector (botão direito no componente).
+    /// Força a redistribuição imediata sem precisar reiniciar o Play.
     /// </summary>
     [ContextMenu("Forçar Redistribuição de Dispositivos")]
     private void ForceReassign()
     {
-        ResolveReferences();
+        ResolveAllReferences();
         AssignDevices();
     }
 
     /// <summary>
-    /// Lista no Console todos os dispositivos detectados pelo Input System.
-    /// Útil para diagnosticar problemas de reconhecimento de controles.
+    /// Botão no Inspector.
+    /// Lista no Console todos os dispositivos que o Input System detectou.
+    /// Útil para diagnosticar controles que não aparecem ou têm nome errado.
     /// </summary>
     [ContextMenu("Listar Dispositivos Conectados")]
     private void ListConnectedDevices()
@@ -431,17 +450,49 @@ public class GenericGamepadAssigner : MonoBehaviour
 
         if (devices.Count == 0)
         {
-            Debug.Log("[GenericGamepadAssigner] Nenhum dispositivo conectado.");
+            Debug.Log("[GenericGamepadAssigner] Nenhum dispositivo conectado no momento.");
             return;
         }
 
         System.Text.StringBuilder sb = new System.Text.StringBuilder();
-        sb.AppendLine($"[GenericGamepadAssigner] {devices.Count} dispositivo(s) conectado(s):");
+        sb.AppendLine($"[GenericGamepadAssigner] {devices.Count} dispositivo(s) detectado(s):");
 
         foreach (var d in devices)
-            sb.AppendLine($"  • {d.displayName} ({d.GetType().Name}) — ID: {d.deviceId}");
+            sb.AppendLine($"  • {d.displayName}  |  Tipo: {d.GetType().Name}  |  ID: {d.deviceId}");
 
         Debug.Log(sb.ToString());
     }
+
+    /// <summary>
+    /// Botão no Inspector.
+    /// Exibe o estado atual de pareamento de cada slot configurado.
+    /// </summary>
+    [ContextMenu("Exibir Estado dos Slots")]
+    private void PrintSlotStatus()
+    {
+        System.Text.StringBuilder sb = new System.Text.StringBuilder();
+        sb.AppendLine("[GenericGamepadAssigner] Estado dos slots:");
+
+        int limit = Mathf.Min(players.Count, 4);
+
+        for (int i = 0; i < limit; i++)
+        {
+            PlayerSlot slot = players[i];
+            string inputName   = slot.resolvedInput != null ? slot.resolvedInput.gameObject.name : "não resolvido";
+            string deviceNames = "nenhum";
+
+            if (slot.resolvedInput != null && slot.resolvedInput.user.valid)
+            {
+                var pairedDevices = slot.resolvedInput.user.pairedDevices;
+                if (pairedDevices.Count > 0)
+                    deviceNames = string.Join(", ", System.Linq.Enumerable.Select(pairedDevices, d => d.displayName));
+            }
+
+            sb.AppendLine($"  Slot {i} | {slot.label} | GameObject: {inputName} | Dispositivos: {deviceNames}");
+        }
+
+        Debug.Log(sb.ToString());
+    }
+
 #endif
 }
