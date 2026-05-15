@@ -40,6 +40,7 @@ O `GenericGamepadAssigner.cs` foi criado para resolver uma limitação irritante
 - É SIMPLES, CRIE UMA TAG PARA CADA JOGADOR.
 - O script suporta até 4 jogadores porque essa é a configuração mais comum para multiplayer local e evita complexidade desnecessária, fechou?.
 - Se quiser testar durante o desenvolvimento, use os context menus do componente no Inspector para forçar redistribuição ou listar dispositivos conectados.
+- Use o codigo PlayerControllerScript para te guiar na criação do codigo do seu jogo.
 
 ## Resumo rápido de uso em um jogo multiplayer local
 
